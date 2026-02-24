@@ -10,9 +10,9 @@ RUN pip3 install -r requirements.txt --break-system-package
 WORKDIR /srv
 COPY ./server.py /srv/server.py
 
-RUN chown -R appuser:appuser /srv
+RUN chown -R user:user /srv
 
-USER appuser
+USER user
 
 EXPOSE 8000
 
