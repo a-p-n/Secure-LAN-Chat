@@ -1,119 +1,90 @@
-import socket
-import threading
-import struct
+import asyncio
+import websockets
+import argparse
 import os
-import sys
+import subprocess
 from Crypto.PublicKey import RSA, ECC
 from Crypto.Signature import pss
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA256
 from Crypto.Protocol.KDF import HKDF
 
-def send_packet(sock, data):
-    length = struct.pack('!I', len(data))
-    sock.sendall(length + data)
+SERVER_URL = "ws://127.0.0.1:8000/ws"
+DOWNLOAD_DIR = os.path.expanduser("~/Downloads/my_files")
 
-def recv_packet(sock):
-    len_bytes = sock.recv(4)
-    if not len_bytes: return None
-    length = struct.unpack('!I', len_bytes)[0]
-    data = b''
-    while len(data) < length:
-        chunk = sock.recv(length - len(data))
-        if not chunk: return None
-        data += chunk
-    return data
+async def secure_handshake(ws):
+    server_rsa_pub = RSA.import_key(await ws.recv())
+    server_eph_bytes = await ws.recv()
+    signature = await ws.recv()
+    
+    h = SHA256.new(server_eph_bytes)
+    pss.new(server_rsa_pub).verify(h, signature)
 
-def receive_messages(sock, key):
-    try:
+    server_eph_pub = ECC.import_key(server_eph_bytes.decode('utf-8'))
+    client_eph_key = ECC.generate(curve='P-256')
+    await ws.send(client_eph_key.public_key().export_key(format='PEM').encode('utf-8'))
+
+    shared_point = server_eph_pub.pointQ * client_eph_key.d
+    shared_secret = shared_point.x.to_bytes()
+    session_key = HKDF(shared_secret, 32, salt=b'', hashmod=SHA256)
+    return session_key
+
+async def authenticate(ws, session_key, username):
+    cipher = AES.new(session_key, AES.MODE_GCM)
+    ciphertext, tag = cipher.encrypt_and_digest(username.encode('utf-8'))
+    await ws.send(cipher.nonce + tag + ciphertext)
+
+async def run_daemon():
+    print("[DAEMON]: Starting secure background listener...")
+    async with websockets.connect(SERVER_URL) as ws:
+        session_key = await secure_handshake(ws)
+        await authenticate(ws, session_key, "laptop-daemon")
+        
         while True:
-            payload = recv_packet(sock)
-            if not payload:
-                print("\n[CLIENT]: Disconnected.")
-                os._exit(0)
-            
-            nonce, tag, ciphertext = payload[:16], payload[16:32], payload[32:]
             try:
-                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                payload = await ws.recv()
+                nonce, tag, ciphertext = payload[:16], payload[16:32], payload[32:]
+                
+                cipher = AES.new(session_key, AES.MODE_GCM, nonce=nonce)
                 plaintext = cipher.decrypt_and_verify(ciphertext, tag)
                 
-                sys.stdout.write(f"\r{plaintext.decode('utf-8')}\n")
-                sys.stdout.write("[YOU]: ")
-                sys.stdout.flush()
-            except ValueError:
-                print("\n[CLIENT]: Integrity Check Failed!")
-    except OSError:
-        pass
+                filepath = os.path.join(DOWNLOAD_DIR, "secure_transfer_file")
+                with open(filepath, "wb") as f:
+                    f.write(plaintext)
+                
+                subprocess.run(['notify-send', 'Secure Transfer', 'New file received in Downloads!'])
+                print(f"[DAEMON]: File saved to {filepath}")
+                
+            except Exception as e:
+                print(f"[DAEMON]: Error receiving data - {e}")
+                break
 
-def run_client():
-    SERVER_HOST = '10.121.119.79' 
-    SERVER_PORT = 65432
-
-    my_username = input("Enter your username: ")
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.connect((SERVER_HOST, SERVER_PORT))
-    except:
-        print("Connection refused.")
+async def send_file(filepath):
+    if not os.path.exists(filepath):
+        print(f"Error: File '{filepath}' not found.")
         return
 
-    print(f"[CLIENT]: Connected...")
-
-    try:
-        server_rsa_pub = RSA.import_key(recv_packet(sock))
+    print(f"[CLI]: Encrypting and sending {filepath}...")
+    async with websockets.connect(SERVER_URL) as ws:
+        session_key = await secure_handshake(ws)
+        await authenticate(ws, session_key, "laptop-cli")
         
-        server_eph_bytes = recv_packet(sock)
-        signature = recv_packet(sock)
-        
-        h = SHA256.new(server_eph_bytes)
-        try:
-            pss.new(server_rsa_pub).verify(h, signature)
-        except:
-            print("[CLIENT]: Verification FAILED!")
-            return
-
-        server_eph_pub = ECC.import_key(server_eph_bytes)
-        client_eph_key = ECC.generate(curve='P-256')
-        send_packet(sock, client_eph_key.public_key().export_key(format='PEM').encode('utf-8'))
-
-        shared_point = server_eph_pub.pointQ * client_eph_key.d
-        shared_secret = shared_point.x.to_bytes()
-        session_key = HKDF(shared_secret, 32, salt=b'', hashmod=SHA256)
-        
-    except Exception as e:
-        print(f"[CLIENT]: Handshake failed: {e}")
-        return
-
-    cipher = AES.new(session_key, AES.MODE_GCM)
-    ciphertext, tag = cipher.encrypt_and_digest(my_username.encode('utf-8'))
-    send_packet(sock, cipher.nonce + tag + ciphertext)
-    
-    print(f"[CLIENT]: Joined chat as '{my_username}'")
-
-    recv_thread = threading.Thread(target=receive_messages, args=(sock, session_key))
-    recv_thread.daemon = True
-    recv_thread.start()
-    
-    sys.stdout.write("[YOU]: ")
-    sys.stdout.flush()
-
-    while True:
-        msg = input()
-        if not msg: break
-        
-        sys.stdout.write("\033[F")
-        sys.stdout.write("\033[K")
-        print(f"[YOU]: {msg}")
-        
+        with open(filepath, "rb") as f:
+            file_data = f.read()
+            
         cipher = AES.new(session_key, AES.MODE_GCM)
-        ciphertext, tag = cipher.encrypt_and_digest(msg.encode('utf-8'))
-        send_packet(sock, cipher.nonce + tag + ciphertext)
-        
-        sys.stdout.write("[YOU]: ")
-        sys.stdout.flush()
-
-    sock.close()
+        ciphertext, tag = cipher.encrypt_and_digest(file_data)
+        await ws.send(cipher.nonce + tag + ciphertext)
+        print("[CLI]: Transfer complete.")
 
 if __name__ == "__main__":
-    run_client()
+    parser = argparse.ArgumentParser(description="Secure LAN Chat / File Transfer")
+    parser.add_argument("file", nargs="?", help="The file to send. If omitted, runs in daemon mode.")
+    args = parser.parse_args()
+
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+    if args.file:
+        asyncio.run(send_file(args.file))
+    else:
+        asyncio.run(run_daemon())
