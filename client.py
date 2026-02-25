@@ -8,6 +8,7 @@ from Crypto.Signature import pss
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA256
 from Crypto.Protocol.KDF import HKDF
+import struct
 
 SERVER_URL = "ws://127.0.0.1:8000/ws"
 DOWNLOAD_DIR = os.path.expanduser("~/Downloads/my_files")
@@ -48,12 +49,25 @@ async def run_daemon():
                 cipher = AES.new(session_key, AES.MODE_GCM, nonce=nonce)
                 plaintext = cipher.decrypt_and_verify(ciphertext, tag)
                 
-                filepath = os.path.join(DOWNLOAD_DIR, "secure_transfer_file")
-                with open(filepath, "wb") as f:
-                    f.write(plaintext)
+                msg_type = plaintext[0]
                 
-                subprocess.run(['notify-send', 'Secure Transfer', 'New file received in Downloads!'])
-                print(f"[DAEMON]: File saved to {filepath}")
+                if msg_type == 0: # Text Broadcast
+                    print(plaintext[1:].decode('utf-8'))
+                    
+                elif msg_type == 1: # File Transfer
+                    name_len = struct.unpack('!I', plaintext[1:5])[0]
+                    
+                    filename = plaintext[5 : 5+name_len].decode('utf-8')
+                    file_data = plaintext[5+name_len :]
+                    
+                    safe_filename = os.path.basename(filename)
+                    filepath = os.path.join(DOWNLOAD_DIR, safe_filename)
+                    
+                    with open(filepath, "wb") as f:
+                        f.write(file_data)
+                    
+                    subprocess.run(['notify-send', 'Secure Transfer', f'Received: {safe_filename}'])
+                    print(f"[DAEMON]: Saved {safe_filename}")
                 
             except Exception as e:
                 print(f"[DAEMON]: Error receiving data - {e}")
@@ -64,16 +78,23 @@ async def send_file(filepath):
         print(f"Error: File '{filepath}' not found.")
         return
 
-    print(f"[CLI]: Encrypting and sending {filepath}...")
+    filename = os.path.basename(filepath)
+    print(f"[CLI]: Encrypting and sending {filename}...")
+    
     async with websockets.connect(SERVER_URL) as ws:
         session_key = await secure_handshake(ws)
         await authenticate(ws, session_key, "laptop-cli")
         
+        name_bytes = filename.encode('utf-8')
+        name_len_bytes = struct.pack('!I', len(name_bytes))
+        
         with open(filepath, "rb") as f:
             file_data = f.read()
             
+        payload_to_encrypt = b'\x01' + name_len_bytes + name_bytes + file_data
+            
         cipher = AES.new(session_key, AES.MODE_GCM)
-        ciphertext, tag = cipher.encrypt_and_digest(file_data)
+        ciphertext, tag = cipher.encrypt_and_digest(payload_to_encrypt)
         await ws.send(cipher.nonce + tag + ciphertext)
         print("[CLI]: Transfer complete.")
 

@@ -19,22 +19,26 @@ clients = {}
 
 SERVER_IDENTITY = RSA.generate(2048)
 
-async def broadcast(message: str, sender_ws: WebSocket):
+async def broadcast(message_bytes: bytes, sender_ws: WebSocket, sender_name: str = ""):
     disconnected = []
     for ws, client_data in clients.items():
         if ws == sender_ws:
             continue
+            
+        if sender_name == "laptop-cli" and client_data['name'] == "laptop-daemon":
+            continue
+            
         try:
             key = client_data['key']
             cipher = AES.new(key, AES.MODE_GCM)
-            ciphertext, tag = cipher.encrypt_and_digest(message.encode('utf-8'))
+            ciphertext, tag = cipher.encrypt_and_digest(message_bytes)
             
             payload = cipher.nonce + tag + ciphertext
             await ws.send_bytes(payload)
         except Exception as e:
             print(f"[SERVER]: Error broadcasting: {e}")
             disconnected.append(ws)
-    
+            
     for ws in disconnected:
         del clients[ws]
 
@@ -67,11 +71,12 @@ async def websocket_endpoint(websocket: WebSocket):
         
         cipher = AES.new(session_key, AES.MODE_GCM, nonce=nonce)
         username = cipher.decrypt_and_verify(ciphertext, tag).decode('utf-8')
-        
+            
         print(f"[SERVER]: Verified device '{username}'")
         clients[websocket] = {'key': session_key, 'name': username}
         
-        await broadcast(f"Server: {username} has connected to the secure relay.", websocket)
+        announcement = b'\x00' + f"Server: {username} has connected.".encode('utf-8')
+        await broadcast(announcement, websocket)
 
         while True:
             payload = await websocket.receive_bytes()
@@ -81,11 +86,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 cipher = AES.new(session_key, AES.MODE_GCM, nonce=nonce)
                 plaintext = cipher.decrypt_and_verify(ciphertext, tag)
                 
-                msg_str = plaintext.decode('utf-8', errors='ignore')
-                print(f"[{username}]: Transmitted {len(plaintext)} bytes")
-                
-                await broadcast(f"{username}: {msg_str}", websocket)
-                
+                msg_type = plaintext[0]
+
+                if msg_type == 0:
+                    msg_str = plaintext[1:].decode('utf-8', errors='ignore')
+                    print(f"[{username}]: {msg_str}")
+                    
+                    fwd_payload = b'\x00' + f"{username}: {msg_str}".encode('utf-8')
+                    await broadcast(fwd_payload, websocket, username)
+                    
+                elif msg_type == 1:
+                    print(f"[{username}]: Transmitted File ({len(plaintext)} bytes)")
+                    
+                    await broadcast(plaintext, websocket, username)
+                    
             except ValueError:
                 print(f"[SERVER]: Integrity Check Failed for {username}!")
                 break
