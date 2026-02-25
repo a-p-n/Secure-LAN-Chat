@@ -5,8 +5,15 @@ from Crypto.Signature import pss
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA256
 from Crypto.Protocol.KDF import HKDF
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="web"), name="static")
+
+@app.get("/")
+async def get_index():
+    return FileResponse("web/index.html")
 
 clients = {} 
 

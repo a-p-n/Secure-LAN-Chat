@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Transfer</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <style>
+        body { font-family: sans-serif; background: #121212; color: white; text-align: center; padding: 2rem; }
+        .box { border: 2px dashed #444; padding: 2rem; border-radius: 10px; margin-top: 2rem; }
+        button { background: #4CAF50; color: white; border: none; padding: 10px 20px; border-radius: 5px; font-size: 1rem; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>Secure Transfer</h1>
+    <p id="status">Connecting to relay...</p>
+    
+    <div class="box">
+        <p>Select a file to encrypt and send to EndeavourOS</p>
+        <input type="file" id="fileInput">
+        <br><br>
+        <button id="sendBtn" disabled>Send File</button>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js')
+            .then(() => console.log('Service Worker Registered'));
+        }
+    </script>
+</body>
+</html>
